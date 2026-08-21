@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AWS Console Deployment Steps — Angular + Spring Boot (Fargate)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.5;margin:0;padding:0;background:#f7fafc;color:#1a202c}
+    .wrap{max-width:980px;margin:32px auto;padding:24px;background:white;border-radius:8px;box-shadow:0 4px 20px rgba(2,6,23,.08)}
+    h1{margin-top:0;font-size:1.6rem}
+    h2{margin:20px 0 8px}
+    ol li{margin:10px 0}
+    pre{background:#f3f4f6;padding:12px;border-radius:6px;overflow:auto}
+    .toc a{display:inline-block;margin-right:12px;margin-bottom:8px}
+    .note{background:#fff7ed;border-left:4px solid #f6ad55;padding:10px;border-radius:4px;margin:12px 0}
+    footer{font-size:.875rem;color:#718096;margin-top:20px}
+    @media print{body{background:white} .wrap{box-shadow:none} nav{display:none}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AWS Console Deployment Steps</h1>
+    <p>Concise step-by-step AWS Console walkthrough to deploy the Angular 19 + Spring Boot (Java 17) app to ECS Fargate with a public Application Load Balancer (region: us-east-1).</p>
+
+    <nav class="toc">
+      <strong>Jump to:</strong>
+      <a href="#prereq">Prerequisites</a>
+      <a href="#ecr">Create ECR repo</a>
+      <a href="#push">Push image to ECR</a>
+      <a href="#iam">Create IAM roles</a>
+      <a href="#vpc">VPC & Subnets</a>
+      <a href="#sg">Security Groups</a>
+      <a href="#logs">CloudWatch Logs</a>
+      <a href="#tg">Target Group</a>
+      <a href="#alb">Create ALB</a>
+      <a href="#cluster">ECS Cluster</a>
+      <a href="#taskdef">Task Definition</a>
+      <a href="#service">ECS Service</a>
+      <a href="#verify">Verify</a>
+      <a href="#https">Add HTTPS (optional)</a>
+    </nav>
+
+    <section id="prereq">
+      <h2>Prerequisites</h2>
+      <ol>
+        <li>AWS Console access with permissions: ECR, ECS, IAM, EC2 (VPC/SG), ELB, CloudWatch Logs, and optionally ACM/Route53.</li>
+        <li>Docker installed locally (to build and push the image).</li>
+        <li>Your repository with Dockerfile at project root (multi-stage as provided).</li>
+      </ol>
+    </section>
+
+    <section id="ecr">
+      <h2>1. Create ECR repository</h2>
+      <ol>
+        <li>Console → Services → Elastic Container Registry → Repositories → Create repository.</li>
+        <li>Repository name: <code>my-java-angular-app</code>. Visibility: Private. Enable image scanning (recommended).</li>
+        <li>Click Create repository.</li>
+      </ol>
+      <div class="note">ECR stores your Docker images so ECS can pull them at runtime.</div>
+    </section>
+
+    <section id="push">
+      <h2>2. Push your Docker image to ECR</h2>
+      <ol>
+        <li>Open your ECR repo page and click <em>View push commands</em>. Follow the four steps shown. Typical commands:</li>
+      </ol>
+      <pre>aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin &lt;ACCOUNT&gt;.dkr.ecr.us-east-1.amazonaws.com
+
+docker build -t my-java-angular-app:latest .
+
+docker tag my-java-angular-app:latest &lt;ACCOUNT&gt;.dkr.ecr.us-east-1.amazonaws.com/my-java-angular-app:latest
+
+docker push &lt;ACCOUNT&gt;.dkr.ecr.us-east-1.amazonaws.com/my-java-angular-app:latest</pre>
+      <p>Replace &lt;ACCOUNT&gt; with your AWS account ID.</p>
+    </section>
+
+    <section id="iam">
+      <h2>3. Create IAM role: ecsTaskExecutionRole</h2>
+      <ol>
+        <li>Console → Services → IAM → Roles → Create role.</li>
+        <li>Trusted entity: AWS service → Elastic Container Service → Task.</li>
+        <li>Attach managed policy: <code>AmazonECSTaskExecutionRolePolicy</code>.</li>
+        <li>Name: <code>ecsTaskExecutionRole</code>. Create role.</li>
+      </ol>
+      <p class="note">This role lets Fargate pull images from ECR and write logs to CloudWatch.</p>
+
+      <h3>Optional: create ecsTaskRole</h3>
+      <ol>
+        <li>Create a second role (same trusted entity) and attach least-privilege policies your app needs (e.g., S3 read only) or leave empty if not needed.</li>
+        <li>Name: <code>ecsTaskRole</code>.</li>
+      </ol>
+    </section>
+
+    <section id="vpc">
+      <h2>4. Choose or create VPC and subnets</h2>
+      <ol>
+        <li>Console → VPC → Your VPCs. Use an existing multi-AZ VPC for production.</li>
+        <li>Requirements:
+          <ul>
+            <li>At least 2 public subnets (for the ALB).</li>
+            <li>At least 2 private subnets (for ECS tasks) with a NAT gateway for egress.</li>
+          </ul>
+        </li>
+        <li>For quick testing you can use the default VPC (has public subnets), but production should use private subnets for tasks.</li>
+      </ol>
+    </section>
+
+    <section id="sg">
+      <h2>5. Create Security Groups</h2>
+      <h3>ALB security group</h3>
+      <ol>
+        <li>VPC → Security Groups → Create security group.</li>
+        <li>Name: <code>my-java-angular-alb-sg</code>. Inbound: HTTP (80) from 0.0.0.0/0. Outbound: allow all.</li>
+      </ol>
+      <h3>Task security group</h3>
+      <ol>
+        <li>Create <code>my-java-angular-task-sg</code> in same VPC.</li>
+        <li>Inbound: allow port 8080 from <strong>ALB security group</strong> (reference the ALB SG, not 0.0.0.0/0).</li>
+        <li>Outbound: allow all (or restrict as needed).</li>
+      </ol>
+      <div class="note">This ensures only ALB can reach your app containers.</div>
+    </section>
+
+    <section id="logs">
+      <h2>6. Create CloudWatch log group</h2>
+      <ol>
+        <li>CloudWatch → Logs → Create log group → Name: <code>/ecs/my-java-angular</code>.</li>
+        <li>Used by the task definition awslogs driver for container logs.</li>
+      </ol>
+    </section>
+
+    <section id="tg">
+      <h2>7. Create Target Group (type: IP)</h2>
+      <ol>
+        <li>EC2 → Target Groups → Create target group.</li>
+        <li>Target type: <code>IP</code>. Protocol: HTTP. Port: 8080. VPC: your VPC.</li>
+        <li>Health check: Path <code>/</code> or <code>/actuator/health</code>. Create the target group: <code>my-java-angular-tg</code>.</li>
+      </ol>
+      <div class="note">Fargate tasks register their ENI IPs into an IP target group automatically.</div>
+    </section>
+
+    <section id="alb">
+      <h2>8. Create Application Load Balancer (ALB)</h2>
+      <ol>
+        <li>EC2 → Load Balancers → Create Load Balancer → Application Load Balancer.</li>
+        <li>Name: <code>my-java-angular-alb</code>. Scheme: internet-facing. Subnets: choose 2+ public subnets in different AZs.</li>
+        <li>Security group: <code>my-java-angular-alb-sg</code>. Listener: HTTP :80 → Default forward to <code>my-java-angular-tg</code>.</li>
+        <li>Create the ALB.</li>
+      </ol>
+    </section>
+
+    <section id="cluster">
+      <h2>9. Create ECS Cluster (Fargate)</h2>
+      <ol>
+        <li>ECS → Clusters → Create cluster → Networking only (Fargate).</li>
+        <li>Cluster name: <code>my-java-angular-cluster</code>. Create.</li>
+      </ol>
+    </section>
+
+    <section id="taskdef">
+      <h2>10. Register Task Definition (Fargate)</h2>
+      <ol>
+        <li>ECS → Task Definitions → Create new Task Definition → FARGATE.</li>
+        <li>Task name/family: <code>my-java-angular-task</code>.</li>
+        <li>Task execution role: <code>ecsTaskExecutionRole</code>. Task role: <code>ecsTaskRole</code> (or None).</li>
+        <li>Task CPU: <code>512</code> (0.5 vCPU). Memory: <code>1024</code> (1 GB).</li>
+        <li>Add container definition:
+          <ul>
+            <li>Name: <code>my-java-angular-container</code></li>
+            <li>Image: <code>&lt;ACCOUNT&gt;.dkr.ecr.us-east-1.amazonaws.com/my-java-angular-app:latest</code></li>
+            <li>Port mapping: container port <code>8080</code></li>
+            <li>Logging: awslogs — log group: <code>/ecs/my-java-angular</code>, stream prefix: <code>ecs</code></li>
+          </ul>
+        </li>
+        <li>Create the task definition.</li>
+      </ol>
+    </section>
+
+    <section id="service">
+      <h2>11. Create ECS Service and attach ALB</h2>
+      <ol>
+        <li>ECS → Clusters → my-java-angular-cluster → Services → Create.</li>
+        <li>Launch type: FARGATE. Task definition: <code>my-java-angular-task</code>. Service name: <code>my-java-angular-service</code>. Desired count: 1.</li>
+        <li>Networking: select VPC; select private subnets (recommended). Choose <code>my-java-angular-task-sg</code> security group.</li>
+        <li>Load balancing: Application Load Balancer → choose <code>my-java-angular-alb</code> → container: <code>my-java-angular-container:8080</code> → target group: <code>my-java-angular-tg</code>.</li>
+        <li>Create service. ECS will launch tasks and register them with the target group.</li>
+      </ol>
+      <div class="note">For quick tests you can use public subnets and assign Public IP = ENABLED; for production prefer private subnets and NAT gateway.</div>
+    </section>
+
+    <section id="verify">
+      <h2>12. Verify deployment</h2>
+      <ol>
+        <li>In ECS, ensure Task status becomes <strong>RUNNING</strong> and that containers start without errors.</li>
+        <li>EC2 → Target Groups → my-java-angular-tg → Targets: ensure targets are <strong>healthy</strong>.</li>
+        <li>EC2 → Load Balancers → my-java-angular-alb → Description → DNS name: open in browser to see the app.</li>
+      </ol>
+    </section>
+
+    <section id="https">
+      <h2>13. Add HTTPS (optional, production)</h2>
+      <ol>
+        <li>ACM (us-east-1): Request a public certificate for your domain and validate ownership (DNS recommended).</li>
+        <li>EC2 → Load Balancers → Listeners → Add listener: HTTPS :443. Select ACM certificate. Default action: forward to <code>my-java-angular-tg</code>.</li>
+        <li>Optionally remove HTTP :80 listener or create a redirect from HTTP to HTTPS.</li>
+      </ol>
+    </section>
+
+    <section id="notes">
+      <h2>Notes & Recommendations</h2>
+      <ul>
+        <li>Run tasks in private subnets for security; use a NAT gateway for outbound internet access where required.</li>
+        <li>Use immutable image tags (git SHA) and ECR image scanning on push.</li>
+        <li>Set up Auto Scaling on the ECS service for availability and cost efficiency.</li>
+        <li>Store Jenkins credentials securely (Jenkins credentials store or assume-role approach).</li>
+        <li>Use CloudWatch alarms (unhealthy targets, high error rate) and automated rollback strategies if needed.</li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>Generated: 2026-08-20. This single-page file mirrors the console steps and explains why each step matters. Ask to export as PDF or request automation templates (CloudFormation/Terraform) if you want full automation.</p>
+    </footer>
+  </div>
+</body>
+</html>
