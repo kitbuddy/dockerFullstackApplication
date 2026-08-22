@@ -38,19 +38,19 @@ COPY --from=node-builder /app/frontend/dist /app/backend/src/main/resources/stat
 # Build the Spring Boot application (skip tests in Docker build for speed)
 RUN mvn -B -f pom.xml clean package -DskipTests
 
-######### Stage 3: Production runtime (JRE only) #########
-FROM eclipse-temurin:17-jre-jammy
+######### Stage 3: Runtime: Tomcat (WAR deployment) #########
+FROM tomcat:10.1-jdk17-temurin
 LABEL stage=runtime
 
-# Create non-root user
-RUN useradd -m appuser && mkdir /app && chown appuser:appuser /app
-USER appuser
-WORKDIR /app
+# Clean default webapps directory and deploy application as ROOT.war
+RUN rm -rf /usr/local/tomcat/webapps/*
 
-# Copy the fat jar from the maven-builder
-COPY --from=maven-builder --chown=appuser:appuser /app/backend/target/*.jar ./app.jar
+# Copy the built WAR into Tomcat webapps as ROOT.war
+COPY --from=maven-builder /app/backend/target/*.war /usr/local/tomcat/webapps/ROOT.war
 
 EXPOSE 8080
-ENV JAVA_OPTS "-Xms256m -Xmx512m -Dspring.profiles.active=prod"
+# JVM options for Tomcat
+ENV CATALINA_OPTS "-Xms256m -Xmx512m -Dspring.profiles.active=prod"
 
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+# Use Tomcat's default entrypoint which starts catalina
+CMD ["catalina.sh", "run"]
