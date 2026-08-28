@@ -66,7 +66,7 @@ if [[ "${ID:-}" == "ubuntu" || "${ID:-}" == "debian" ]]; then
 elif [[ "${ID:-}" == "amzn" || "${ID:-}" == "al2023" ]]; then
   sudo dnf install -y java-17-amazon-corretto tomcat10
   TOMCAT_WEBAPPS="/var/lib/tomcat/webapps"
-  TOMCAT_SERVICE="tomcat"
+  TOMCAT_SERVICE="tomcat10"
 else
   echo "Unsupported OS. Please run on Ubuntu/Debian or Amazon Linux 2023."
   exit 1
